@@ -27,6 +27,6 @@ Thumbs.db
 *.swp
 *.swo
 
-# Optional: batch output
+# batch output
 data/predictions.csv
 
