@@ -1,52 +1,53 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from pydantic import BaseModel
 import joblib
-import os
-from typing import Dict
-from app.metrics import observe_request, metrics_endpoint, REQUEST_COUNT, REQUEST_LATENCY
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+from fastapi.responses import Response
+import time
 
-app = FastAPI(title="Model Server")
+# ----- Load model -----
+model_data = joblib.load("models/baseline.joblib")
+model = model_data['model']
+model_version = model_data['version']
 
-# Load model at startup
-MODEL_PATH = os.environ.get("MODEL_PATH", "models/baseline.joblib")
+# ----- FastAPI app -----
+app = FastAPI(title="Model Serving API")
 
-class PredictRequest(BaseModel):
+# ----- Prometheus metrics -----
+REQUEST_COUNT = Counter(
+    "request_count", "Total number of requests", ["endpoint"]
+)
+REQUEST_LATENCY = Histogram(
+    "request_latency_seconds", "Request latency in seconds", ["endpoint"]
+)
+
+# ----- Input data schema -----
+class InputData(BaseModel):
     x1: float
     x2: float
 
-class PredictResponse(BaseModel):
-    score: float
-    model_version: str
-
-@app.on_event("startup")
-def load_model():
-    global model, model_version
-    try:
-        saved = joblib.load(MODEL_PATH)
-        model = saved["model"]
-        model_version = saved.get("version", "v1.0")
-        print(f"Loaded model from {MODEL_PATH} version={model_version}")
-    except Exception as e:
-        print("Failed to load model:", e)
-        # re-raise so the server fails fast if model missing
-        raise
-
+# ----- Endpoints -----
 @app.get("/health")
 def health():
+    REQUEST_COUNT.labels(endpoint="/health").inc()
     return {"status": "ok"}
 
-@app.post("/predict", response_model=PredictResponse)
-@observe_request
-def predict(payload: PredictRequest):
-    try:
-        X = [[payload.x1, payload.x2]]
-        proba = model.predict_proba(X)
-        # For binary logistic regression, take probability of class 1
-        score = float(proba[0][1])
-        return {"score": score, "model_version": model_version}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+@app.post("/predict")
+def predict(input_data: InputData):
+    start_time = time.time()
+    
+    x1 = input_data.x1
+    x2 = input_data.x2
+    
+    # Prediction
+    score = model.predict_proba([[x1, x2]])[:, 1][0]
+    
+    # Record metrics
+    REQUEST_COUNT.labels(endpoint="/predict").inc()
+    REQUEST_LATENCY.labels(endpoint="/predict").observe(time.time() - start_time)
+    
+    return {"score": float(score), "model_version": model_version}
 
 @app.get("/metrics")
 def metrics():
-    return metrics_endpoint()
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
